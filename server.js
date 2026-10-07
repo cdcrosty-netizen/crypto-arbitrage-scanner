@@ -6,8 +6,6 @@ const PORT = process.env.PORT || 3000;
 const CAPITAL_USDT = 10;
 const MAX_NORMAL_GROSS_PERCENT = 10;
 
-// Comisiones estimadas por operación.
-// Luego podemos reemplazarlas por las reales de cada cuenta.
 const FEES = {
   Binance: 0.001,
   OKX: 0.001,
@@ -34,10 +32,7 @@ async function getJson(url) {
 }
 
 function validPrice(value) {
-  return (
-    Number.isFinite(value) &&
-    value > 0
-  );
+  return Number.isFinite(value) && value > 0;
 }
 
 // ======================================================
@@ -57,9 +52,7 @@ async function getBinance() {
     const bid = Number(item.bidPrice);
     const ask = Number(item.askPrice);
 
-    if (!validPrice(bid) || !validPrice(ask)) {
-      continue;
-    }
+    if (!validPrice(bid) || !validPrice(ask)) continue;
 
     result[item.symbol] = {
       exchange: "Binance",
@@ -86,15 +79,11 @@ async function getOKX() {
   for (const item of data.data || []) {
     if (!item.instId?.endsWith("-USDT")) continue;
 
-    const symbol =
-      item.instId.replaceAll("-", "");
-
+    const symbol = item.instId.replaceAll("-", "");
     const bid = Number(item.bidPx);
     const ask = Number(item.askPx);
 
-    if (!validPrice(bid) || !validPrice(ask)) {
-      continue;
-    }
+    if (!validPrice(bid) || !validPrice(ask)) continue;
 
     result[symbol] = {
       exchange: "OKX",
@@ -121,15 +110,11 @@ async function getKuCoin() {
   for (const item of data.data?.ticker || []) {
     if (!item.symbol?.endsWith("-USDT")) continue;
 
-    const symbol =
-      item.symbol.replaceAll("-", "");
-
+    const symbol = item.symbol.replaceAll("-", "");
     const bid = Number(item.buy);
     const ask = Number(item.sell);
 
-    if (!validPrice(bid) || !validPrice(ask)) {
-      continue;
-    }
+    if (!validPrice(bid) || !validPrice(ask)) continue;
 
     result[symbol] = {
       exchange: "KuCoin",
@@ -153,23 +138,18 @@ async function getBingX() {
 
   const result = {};
 
-  const list =
-    Array.isArray(data.data)
-      ? data.data
-      : [];
+  const list = Array.isArray(data.data)
+    ? data.data
+    : [];
 
   for (const item of list) {
     if (!item.symbol?.endsWith("-USDT")) continue;
 
-    const symbol =
-      item.symbol.replaceAll("-", "");
-
+    const symbol = item.symbol.replaceAll("-", "");
     const bid = Number(item.bidPrice);
     const ask = Number(item.askPrice);
 
-    if (!validPrice(bid) || !validPrice(ask)) {
-      continue;
-    }
+    if (!validPrice(bid) || !validPrice(ask)) continue;
 
     result[symbol] = {
       exchange: "BingX",
@@ -222,8 +202,7 @@ async function getKraken() {
     const tickerData = data.result || {};
 
     for (const pair of chunk) {
-      let base =
-        pair.wsname.replace("/USDT", "");
+      let base = pair.wsname.replace("/USDT", "");
 
       if (base === "XBT") {
         base = "BTC";
@@ -234,9 +213,7 @@ async function getKraken() {
       let ticker = tickerData[pair.key];
 
       if (!ticker) {
-        const key = Object.keys(
-          tickerData
-        ).find(k => {
+        const key = Object.keys(tickerData).find(k => {
           const normalized = k
             .replace(/^X/, "")
             .replace(/^Z/, "");
@@ -257,9 +234,7 @@ async function getKraken() {
       const ask = Number(ticker.a?.[0]);
       const bid = Number(ticker.b?.[0]);
 
-      if (!validPrice(bid) || !validPrice(ask)) {
-        continue;
-      }
+      if (!validPrice(bid) || !validPrice(ask)) continue;
 
       result[symbol] = {
         exchange: "Kraken",
@@ -281,9 +256,9 @@ function calculateOpportunities(markets) {
   const symbols = new Set();
 
   for (const market of Object.values(markets)) {
-    Object.keys(market).forEach(
-      symbol => symbols.add(symbol)
-    );
+    Object.keys(market).forEach(symbol => {
+      symbols.add(symbol);
+    });
   }
 
   const normal = [];
@@ -302,11 +277,7 @@ function calculateOpportunities(markets) {
 
     for (const buy of quotes) {
       for (const sell of quotes) {
-        if (
-          buy.exchange === sell.exchange
-        ) {
-          continue;
-        }
+        if (buy.exchange === sell.exchange) continue;
 
         const buyPrice = buy.ask;
         const sellPrice = sell.bid;
@@ -321,25 +292,23 @@ function calculateOpportunities(markets) {
         if (sellPrice <= buyPrice) continue;
 
         const grossPercent =
-          ((sellPrice - buyPrice) /
-            buyPrice) *
-          100;
+          ((sellPrice - buyPrice) / buyPrice) * 100;
 
         const totalFees =
           ((FEES[buy.exchange] || 0) +
             (FEES[sell.exchange] || 0)) *
           100;
 
-        const netPercent =
+        const netTradingPercent =
           grossPercent - totalFees;
 
-        const estimatedProfit =
+        const profitBeforeTransfer =
           CAPITAL_USDT *
-          (netPercent / 100);
+          (netTradingPercent / 100);
 
-        const estimatedFinal =
+        const totalBeforeTransfer =
           CAPITAL_USDT +
-          estimatedProfit;
+          profitBeforeTransfer;
 
         const opportunity = {
           symbol,
@@ -349,10 +318,17 @@ function calculateOpportunities(markets) {
           sellPrice,
           grossPercent,
           totalFees,
-          netPercent,
+          netTradingPercent,
           capital: CAPITAL_USDT,
-          estimatedProfit,
-          estimatedFinal
+          profitBeforeTransfer,
+          totalBeforeTransfer,
+
+          // Hasta conocer red y comisión real,
+          // no calculamos una ganancia final falsa.
+          transferVerified: false,
+          transferNetwork: null,
+          transferCostUsdt: null,
+          finalProfitUsdt: null
         };
 
         if (
@@ -360,7 +336,7 @@ function calculateOpportunities(markets) {
           MAX_NORMAL_GROSS_PERCENT
         ) {
           suspicious.push(opportunity);
-        } else if (netPercent > 0) {
+        } else if (netTradingPercent > 0) {
           normal.push(opportunity);
         }
       }
@@ -369,12 +345,14 @@ function calculateOpportunities(markets) {
 
   normal.sort(
     (a, b) =>
-      b.netPercent - a.netPercent
+      b.netTradingPercent -
+      a.netTradingPercent
   );
 
   suspicious.sort(
     (a, b) =>
-      b.grossPercent - a.grossPercent
+      b.grossPercent -
+      a.grossPercent
   );
 
   return {
@@ -387,91 +365,67 @@ function calculateOpportunities(markets) {
 // API
 // ======================================================
 
-app.get(
-  "/api/opportunities",
-  async (req, res) => {
-    const exchangeNames = [
-      "Binance",
-      "OKX",
-      "KuCoin",
-      "BingX",
-      "Kraken"
-    ];
+app.get("/api/opportunities", async (req, res) => {
+  const exchangeNames = [
+    "Binance",
+    "OKX",
+    "KuCoin",
+    "BingX",
+    "Kraken"
+  ];
 
-    const requests = [
-      getBinance(),
-      getOKX(),
-      getKuCoin(),
-      getBingX(),
-      getKraken()
-    ];
+  const requests = [
+    getBinance(),
+    getOKX(),
+    getKuCoin(),
+    getBingX(),
+    getKraken()
+  ];
 
-    const results =
-      await Promise.allSettled(requests);
+  const results =
+    await Promise.allSettled(requests);
 
-    const markets = {};
-    const status = {};
-    const counts = {};
+  const markets = {};
+  const status = {};
+  const counts = {};
 
-    results.forEach(
-      (result, index) => {
-        const name =
-          exchangeNames[index];
+  results.forEach((result, index) => {
+    const name = exchangeNames[index];
 
-        if (
-          result.status === "fulfilled"
-        ) {
-          markets[name] =
-            result.value;
+    if (result.status === "fulfilled") {
+      markets[name] = result.value;
+      status[name] = "OK";
+      counts[name] =
+        Object.keys(result.value).length;
+    } else {
+      markets[name] = {};
+      status[name] = "NO DISPONIBLE";
+      counts[name] = 0;
 
-          status[name] = "OK";
-
-          counts[name] =
-            Object.keys(
-              result.value
-            ).length;
-        } else {
-          markets[name] = {};
-          status[name] =
-            "NO DISPONIBLE";
-          counts[name] = 0;
-
-          console.error(
-            `${name} no disponible:`,
-            result.reason?.message
-          );
-        }
-      }
-    );
-
-    const calculated =
-      calculateOpportunities(
-        markets
+      console.error(
+        `${name} no disponible:`,
+        result.reason?.message
       );
+    }
+  });
 
-    res.json({
-      updatedAt:
-        new Date().toISOString(),
+  const calculated =
+    calculateOpportunities(markets);
 
-      capital: CAPITAL_USDT,
-
-      exchanges: counts,
-      status,
-
-      opportunities:
-        calculated.normal.slice(
-          0,
-          250
-        ),
-
-      suspiciousCount:
-        calculated.suspicious.length
-    });
-  }
-);
+  res.json({
+    updatedAt: new Date().toISOString(),
+    capital: CAPITAL_USDT,
+    exchanges: counts,
+    status,
+    opportunities:
+      calculated.normal.slice(0, 250),
+    suspiciousCount:
+      calculated.suspicious.length
+  });
+});
 
 // ======================================================
-// WEB
+// PÁGINA WEB
 // ======================================================
 
 app.get("/", (req, res) => {
@@ -528,7 +482,7 @@ h1 {
   background: #162136;
   padding: 15px 20px;
   border-radius: 10px;
-  min-width: 150px;
+  min-width: 145px;
 }
 
 .exchange-status {
@@ -578,12 +532,12 @@ table {
   width: 100%;
   border-collapse: collapse;
   background: #111a2c;
-  min-width: 1250px;
+  min-width: 1550px;
 }
 
 th,
 td {
-  padding: 11px;
+  padding: 10px;
   border-bottom: 1px solid #25324a;
   text-align: right;
   white-space: nowrap;
@@ -603,17 +557,26 @@ th {
   color: #9ca9bd;
 }
 
-.exchange-link {
-  font-weight: bold;
-  text-decoration: underline;
+a {
+  text-decoration: none;
 }
 
 .buy-link {
   color: #55e68a;
+  font-weight: bold;
+  text-decoration: underline;
 }
 
 .sell-link {
   color: #ff7373;
+  font-weight: bold;
+  text-decoration: underline;
+}
+
+.wallet-link {
+  color: #73b7ff;
+  font-weight: bold;
+  text-decoration: underline;
 }
 
 .good {
@@ -621,8 +584,8 @@ th {
   font-weight: bold;
 }
 
-.profit {
-  color: #55e68a;
+.pending {
+  color: #ffd875;
   font-weight: bold;
 }
 
@@ -659,9 +622,7 @@ th {
 
 <header>
 
-<h1>
-Crypto Arbitrage Scanner
-</h1>
+<h1>Crypto Arbitrage Scanner</h1>
 
 <div class="subtitle">
 Binance · OKX · KuCoin · BingX · Kraken — Spot USDT
@@ -671,10 +632,7 @@ Binance · OKX · KuCoin · BingX · Kraken — Spot USDT
 
 <div class="container">
 
-<div
-  class="cards"
-  id="cards"
-></div>
+<div class="cards" id="cards"></div>
 
 <div class="capital">
 Capital de prueba:
@@ -708,19 +666,21 @@ Cargando precios...
 <thead>
 
 <tr>
-
 <th>⭐</th>
 <th>Moneda</th>
-<th>COMPRAR</th>
+<th>COMPRAR SPOT</th>
 <th>Precio compra</th>
-<th>VENDER</th>
+<th>RETIRAR</th>
+<th>Red</th>
+<th>Costo traslado</th>
+<th>DEPOSITAR</th>
+<th>VENDER SPOT</th>
 <th>Precio venta</th>
 <th>Spread</th>
-<th>Comisiones</th>
-<th>NETO</th>
-<th>Ganancia 10 USDT</th>
-<th>Total estimado</th>
-
+<th>Comisiones trading</th>
+<th>Neto trading</th>
+<th>Ganancia antes traslado</th>
+<th>GANANCIA FINAL</th>
 </tr>
 
 </thead>
@@ -733,29 +693,39 @@ Cargando precios...
 
 <div class="note">
 
-⭐ Tocá la estrella para guardar una oportunidad.
-Las favoritas permanecen guardadas en este navegador
-y aparecen primero cuando siguen disponibles.
+<strong>Cómo leer la tabla:</strong>
 
 <br><br>
 
-Los nombres de los exchanges en COMPRAR y VENDER
-son enlaces. Al tocarlos se intenta abrir el mercado
-Spot correspondiente.
+1. COMPRAR SPOT abre el exchange donde la moneda está más barata.
+
+<br>
+
+2. RETIRAR abre el área de fondos/retiro del exchange de compra.
+
+<br>
+
+3. Antes de transferir, verificá que la misma red esté disponible
+tanto para retirar como para depositar.
+
+<br>
+
+4. DEPOSITAR abre el exchange donde recibirías la moneda.
+
+<br>
+
+5. VENDER SPOT abre el mercado donde el scanner detectó
+el precio de venta superior.
 
 <br><br>
 
-La columna "Ganancia 10 USDT" es una estimación
-basada en el spread actual menos las comisiones
-configuradas.
+Mientras la red y el costo real de transferencia no estén
+verificados, GANANCIA FINAL aparecerá como "Pendiente".
 
 <br><br>
 
-Todavía no incluye profundidad real del libro,
-slippage, mínimos de orden, comisiones de retiro
-ni compatibilidad de redes. Por eso todavía debe
-usarse como scanner informativo y no como garantía
-de ganancia.
+Nunca envíes una criptomoneda sin comprobar moneda,
+red y dirección de depósito.
 
 </div>
 
@@ -764,19 +734,15 @@ de ganancia.
 <script>
 
 const FAVORITES_KEY =
-  "crypto-arbitrage-favorites-v2";
+  "crypto-arbitrage-favorites-v3";
 
 function getFavorites() {
   try {
     const value =
-      localStorage.getItem(
-        FAVORITES_KEY
-      );
+      localStorage.getItem(FAVORITES_KEY);
 
     return new Set(
-      value
-        ? JSON.parse(value)
-        : []
+      value ? JSON.parse(value) : []
     );
   } catch {
     return new Set();
@@ -786,9 +752,7 @@ function getFavorites() {
 function saveFavorites(favorites) {
   localStorage.setItem(
     FAVORITES_KEY,
-    JSON.stringify(
-      [...favorites]
-    )
+    JSON.stringify([...favorites])
   );
 }
 
@@ -801,8 +765,7 @@ function getOpportunityId(item) {
 }
 
 function toggleFavorite(id) {
-  const favorites =
-    getFavorites();
+  const favorites = getFavorites();
 
   if (favorites.has(id)) {
     favorites.delete(id);
@@ -818,27 +781,21 @@ function toggleFavorite(id) {
 }
 
 function getBaseSymbol(symbol) {
-  if (
-    symbol.endsWith("USDT")
-  ) {
-    return symbol.slice(
-      0,
-      -4
-    );
+  if (symbol.endsWith("USDT")) {
+    return symbol.slice(0, -4);
   }
 
   return symbol;
 }
 
-function getExchangeUrl(
-  exchange,
-  symbol
-) {
-  const base =
-    getBaseSymbol(symbol);
+// ======================================================
+// LINKS SPOT
+// ======================================================
+
+function getSpotUrl(exchange, symbol) {
+  const base = getBaseSymbol(symbol);
 
   switch (exchange) {
-
     case "Binance":
       return (
         "https://www.binance.com/en/trade/" +
@@ -881,6 +838,58 @@ function getExchangeUrl(
   }
 }
 
+// ======================================================
+// LINKS RETIRO
+// ======================================================
+
+function getWithdrawUrl(exchange) {
+  switch (exchange) {
+    case "Binance":
+      return "https://www.binance.com/en/my/wallet/account/main/withdrawal/crypto";
+
+    case "OKX":
+      return "https://www.okx.com/balance/withdrawal";
+
+    case "KuCoin":
+      return "https://www.kucoin.com/assets/withdraw";
+
+    case "BingX":
+      return "https://bingx.com/en-us/assets/withdraw/";
+
+    case "Kraken":
+      return "https://www.kraken.com/c/funding/withdraw";
+
+    default:
+      return "#";
+  }
+}
+
+// ======================================================
+// LINKS DEPÓSITO
+// ======================================================
+
+function getDepositUrl(exchange) {
+  switch (exchange) {
+    case "Binance":
+      return "https://www.binance.com/en/my/wallet/account/main/deposit/crypto";
+
+    case "OKX":
+      return "https://www.okx.com/balance/recharge";
+
+    case "KuCoin":
+      return "https://www.kucoin.com/assets/coin";
+
+    case "BingX":
+      return "https://bingx.com/en-us/assets/deposit/";
+
+    case "Kraken":
+      return "https://www.kraken.com/c/funding/deposit";
+
+    default:
+      return "#";
+  }
+}
+
 function formatPrice(value) {
   if (value >= 1000) {
     return value.toLocaleString(
@@ -895,29 +904,20 @@ function formatPrice(value) {
     return value.toFixed(6);
   }
 
-  return Number(
-    value
-  ).toPrecision(7);
+  return Number(value).toPrecision(7);
 }
 
 function formatUsdt(value) {
-  if (Math.abs(value) >= 1) {
-    return value.toFixed(4);
-  }
-
-  return value.toFixed(6);
+  return Number(value).toFixed(4);
 }
 
 function renderRows(opportunities) {
   const rows =
-    document.getElementById(
-      "rows"
-    );
+    document.getElementById("rows");
 
   rows.innerHTML = "";
 
-  const favorites =
-    getFavorites();
+  const favorites = getFavorites();
 
   const sorted =
     [...opportunities].sort(
@@ -932,32 +932,24 @@ function renderRows(opportunities) {
             getOpportunityId(b)
           );
 
-        if (aFav && !bFav) {
-          return -1;
-        }
-
-        if (!aFav && bFav) {
-          return 1;
-        }
+        if (aFav && !bFav) return -1;
+        if (!aFav && bFav) return 1;
 
         return (
-          b.netPercent -
-          a.netPercent
+          b.netTradingPercent -
+          a.netTradingPercent
         );
       }
     );
 
   if (!sorted.length) {
     rows.innerHTML =
-      '<tr><td colspan="11">No hay oportunidades netas positivas dentro del filtro actual.</td></tr>';
+      '<tr><td colspan="15">No hay oportunidades netas positivas dentro del filtro actual.</td></tr>';
 
     return;
   }
 
-  for (
-    const item
-    of sorted.slice(0, 100)
-  ) {
+  for (const item of sorted.slice(0, 100)) {
     const id =
       getOpportunityId(item);
 
@@ -965,47 +957,48 @@ function renderRows(opportunities) {
       favorites.has(id);
 
     const buyUrl =
-      getExchangeUrl(
+      getSpotUrl(
         item.buyExchange,
         item.symbol
       );
 
     const sellUrl =
-      getExchangeUrl(
+      getSpotUrl(
         item.sellExchange,
         item.symbol
       );
 
-    const row =
-      document.createElement(
-        "tr"
+    const withdrawUrl =
+      getWithdrawUrl(
+        item.buyExchange
       );
 
+    const depositUrl =
+      getDepositUrl(
+        item.sellExchange
+      );
+
+    const row =
+      document.createElement("tr");
+
     if (isFavorite) {
-      row.className =
-        "favorite-row";
+      row.className = "favorite-row";
     }
 
     const star =
-      isFavorite
-        ? "★"
-        : "☆";
+      isFavorite ? "★" : "☆";
 
     row.innerHTML = \`
 
 <td>
-
 <button
   class="star \${
-    isFavorite
-      ? "active"
-      : ""
+    isFavorite ? "active" : ""
   }"
   onclick='toggleFavorite(\${JSON.stringify(id)})'
 >
 \${star}
 </button>
-
 </td>
 
 <td>
@@ -1015,41 +1008,63 @@ function renderRows(opportunities) {
 </td>
 
 <td>
-
 <a
-  class="exchange-link buy-link"
+  class="buy-link"
   href="\${buyUrl}"
   target="_blank"
   rel="noopener noreferrer"
 >
 \${item.buyExchange}
 </a>
-
 </td>
 
 <td>
-\${formatPrice(
-  item.buyPrice
-)}
+\${formatPrice(item.buyPrice)}
 </td>
 
 <td>
-
 <a
-  class="exchange-link sell-link"
+  class="wallet-link"
+  href="\${withdrawUrl}"
+  target="_blank"
+  rel="noopener noreferrer"
+>
+Retirar
+</a>
+</td>
+
+<td class="pending">
+Verificar
+</td>
+
+<td class="pending">
+Verificar
+</td>
+
+<td>
+<a
+  class="wallet-link"
+  href="\${depositUrl}"
+  target="_blank"
+  rel="noopener noreferrer"
+>
+Depositar
+</a>
+</td>
+
+<td>
+<a
+  class="sell-link"
   href="\${sellUrl}"
   target="_blank"
   rel="noopener noreferrer"
 >
 \${item.sellExchange}
 </a>
-
 </td>
 
 <td>
-\${formatPrice(
-  item.sellPrice
-)}
+\${formatPrice(item.sellPrice)}
 </td>
 
 <td>
@@ -1061,19 +1076,17 @@ function renderRows(opportunities) {
 </td>
 
 <td class="good">
-\${item.netPercent.toFixed(3)}%
+\${item.netTradingPercent.toFixed(3)}%
 </td>
 
-<td class="profit">
+<td class="good">
 +\${formatUsdt(
-  item.estimatedProfit
+  item.profitBeforeTransfer
 )} USDT
 </td>
 
-<td>
-\${formatUsdt(
-  item.estimatedFinal
-)} USDT
+<td class="pending">
+Pendiente
 </td>
 
     \`;
@@ -1084,9 +1097,7 @@ function renderRows(opportunities) {
 
 async function loadData() {
   const statusElement =
-    document.getElementById(
-      "status"
-    );
+    document.getElementById("status");
 
   statusElement.textContent =
     "Actualizando precios...";
@@ -1111,9 +1122,7 @@ async function loadData() {
     }
 
     const cards =
-      document.getElementById(
-        "cards"
-      );
+      document.getElementById("cards");
 
     cards.innerHTML = "";
 
@@ -1125,30 +1134,22 @@ async function loadData() {
       "Kraken"
     ];
 
-    for (
-      const name
-      of exchangeNames
-    ) {
+    for (const name of exchangeNames) {
       const card =
-        document.createElement(
-          "div"
-        );
+        document.createElement("div");
 
-      card.className =
-        "card";
+      card.className = "card";
 
       card.innerHTML = \`
+        \${name}:
+        <strong>
+          \${data.exchanges[name] || 0}
+        </strong>
+        pares
 
-\${name}:
-<strong>
-\${data.exchanges[name] || 0}
-</strong>
-pares
-
-<div class="exchange-status">
-\${data.status[name]}
-</div>
-
+        <div class="exchange-status">
+          \${data.status[name]}
+        </div>
       \`;
 
       cards.appendChild(card);
@@ -1166,9 +1167,7 @@ pares
         "warning"
       );
 
-    if (
-      data.suspiciousCount > 0
-    ) {
+    if (data.suspiciousCount > 0) {
       warning.style.display =
         "block";
 
