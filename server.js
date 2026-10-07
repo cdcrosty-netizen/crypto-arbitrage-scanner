@@ -3,23 +3,19 @@ const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Comisiones estimadas.
-// Más adelante las configuramos según las comisiones reales de cada cuenta.
 const FEES = {
-  Binance: 0.001,
-  Bybit: 0.001,
   OKX: 0.001,
+  KuCoin: 0.001,
+  BingX: 0.001,
+  Kraken: 0.0026
 };
-
-// ======================================================
-// FUNCIÓN GENERAL PARA CONSULTAR LAS APIs
-// ======================================================
 
 async function getJson(url) {
   const response = await fetch(url, {
     headers: {
-      "User-Agent": "crypto-arbitrage-scanner/1.0",
-    },
+      "User-Agent": "Mozilla/5.0 CryptoArbitrageScanner/1.0",
+      "Accept": "application/json"
+    }
   });
 
   if (!response.ok) {
@@ -27,66 +23,6 @@ async function getJson(url) {
   }
 
   return response.json();
-}
-
-// ======================================================
-// BINANCE
-// ======================================================
-
-async function getBinance() {
-  const data = await getJson(
-    "https://api.binance.com/api/v3/ticker/bookTicker"
-  );
-
-  const result = {};
-
-  for (const item of data) {
-    if (!item.symbol.endsWith("USDT")) continue;
-
-    const bid = Number(item.bidPrice);
-    const ask = Number(item.askPrice);
-
-    if (!bid || !ask) continue;
-
-    result[item.symbol] = {
-      exchange: "Binance",
-      symbol: item.symbol,
-      bid,
-      ask,
-    };
-  }
-
-  return result;
-}
-
-// ======================================================
-// BYBIT
-// ======================================================
-
-async function getBybit() {
-  const data = await getJson(
-    "https://api.bybit.com/v5/market/tickers?category=spot"
-  );
-
-  const result = {};
-
-  for (const item of data.result?.list || []) {
-    if (!item.symbol.endsWith("USDT")) continue;
-
-    const bid = Number(item.bid1Price);
-    const ask = Number(item.ask1Price);
-
-    if (!bid || !ask) continue;
-
-    result[item.symbol] = {
-      exchange: "Bybit",
-      symbol: item.symbol,
-      bid,
-      ask,
-    };
-  }
-
-  return result;
 }
 
 // ======================================================
@@ -104,7 +40,6 @@ async function getOKX() {
     if (!item.instId.endsWith("-USDT")) continue;
 
     const symbol = item.instId.replace("-", "");
-
     const bid = Number(item.bidPx);
     const ask = Number(item.askPx);
 
@@ -114,7 +49,7 @@ async function getOKX() {
       exchange: "OKX",
       symbol,
       bid,
-      ask,
+      ask
     };
   }
 
@@ -122,18 +57,163 @@ async function getOKX() {
 }
 
 // ======================================================
-// CÁLCULO DE ARBITRAJE
+// KUCOIN
+// ======================================================
+
+async function getKuCoin() {
+  const data = await getJson(
+    "https://api.kucoin.com/api/v1/market/allTickers"
+  );
+
+  const result = {};
+
+  for (const item of data.data?.ticker || []) {
+    if (!item.symbol.endsWith("-USDT")) continue;
+
+    const symbol = item.symbol.replace("-", "");
+    const bid = Number(item.buy);
+    const ask = Number(item.sell);
+
+    if (!bid || !ask) continue;
+
+    result[symbol] = {
+      exchange: "KuCoin",
+      symbol,
+      bid,
+      ask
+    };
+  }
+
+  return result;
+}
+
+// ======================================================
+// BINGX
+// ======================================================
+
+async function getBingX() {
+  const data = await getJson(
+    "https://open-api.bingx.com/openApi/spot/v1/ticker/bookTicker"
+  );
+
+  const result = {};
+
+  const list = Array.isArray(data.data)
+    ? data.data
+    : [];
+
+  for (const item of list) {
+    if (!item.symbol?.endsWith("-USDT")) continue;
+
+    const symbol = item.symbol.replace("-", "");
+    const bid = Number(item.bidPrice);
+    const ask = Number(item.askPrice);
+
+    if (!bid || !ask) continue;
+
+    result[symbol] = {
+      exchange: "BingX",
+      symbol,
+      bid,
+      ask
+    };
+  }
+
+  return result;
+}
+
+// ======================================================
+// KRAKEN
+// ======================================================
+
+async function getKraken() {
+  const pairsData = await getJson(
+    "https://api.kraken.com/0/public/AssetPairs"
+  );
+
+  const result = {};
+  const pairs = [];
+
+  for (const [key, info] of Object.entries(pairsData.result || {})) {
+    const wsname = info.wsname || "";
+
+    if (!wsname.endsWith("/USDT")) continue;
+
+    pairs.push({
+      key,
+      wsname
+    });
+  }
+
+  // Kraken permite consultar múltiples pares.
+  // Los dividimos en bloques para evitar URLs excesivamente largas.
+  const chunks = [];
+
+  for (let i = 0; i < pairs.length; i += 50) {
+    chunks.push(pairs.slice(i, i + 50));
+  }
+
+  for (const chunk of chunks) {
+    const pairNames = chunk
+      .map(x => x.key)
+      .join(",");
+
+    const data = await getJson(
+      "https://api.kraken.com/0/public/Ticker?pair=" +
+      encodeURIComponent(pairNames)
+    );
+
+    const tickerData = data.result || {};
+
+    for (const pair of chunk) {
+      const base = pair.wsname
+        .replace("/USDT", "")
+        .replace("XBT", "BTC");
+
+      const symbol = base + "USDT";
+
+      let ticker = tickerData[pair.key];
+
+      if (!ticker) {
+        const possibleKey = Object.keys(tickerData).find(
+          key =>
+            key === pair.key ||
+            key.includes(base)
+        );
+
+        if (possibleKey) {
+          ticker = tickerData[possibleKey];
+        }
+      }
+
+      if (!ticker) continue;
+
+      const ask = Number(ticker.a?.[0]);
+      const bid = Number(ticker.b?.[0]);
+
+      if (!bid || !ask) continue;
+
+      result[symbol] = {
+        exchange: "Kraken",
+        symbol,
+        bid,
+        ask
+      };
+    }
+  }
+
+  return result;
+}
+
+// ======================================================
+// ARBITRAJE
 // ======================================================
 
 function calculateOpportunities(markets) {
-  const exchanges = Object.keys(markets);
-
   const symbols = new Set();
 
-  for (const exchange of exchanges) {
-    Object.keys(markets[exchange]).forEach((symbol) => {
-      symbols.add(symbol);
-    });
+  for (const market of Object.values(markets)) {
+    Object.keys(market).forEach(symbol => symbols.add(symbol));
   }
 
   const opportunities = [];
@@ -141,34 +221,30 @@ function calculateOpportunities(markets) {
   for (const symbol of symbols) {
     const quotes = [];
 
-    for (const exchange of exchanges) {
-      const quote = markets[exchange][symbol];
-
-      if (quote) {
-        quotes.push(quote);
+    for (const market of Object.values(markets)) {
+      if (market[symbol]) {
+        quotes.push(market[symbol]);
       }
     }
 
-    // Necesitamos que la moneda exista
-    // en al menos dos exchanges.
     if (quotes.length < 2) continue;
 
     for (const buy of quotes) {
       for (const sell of quotes) {
         if (buy.exchange === sell.exchange) continue;
 
-        // Para comprar usamos ASK.
-        // Para vender usamos BID.
         const buyPrice = buy.ask;
         const sellPrice = sell.bid;
 
         if (!buyPrice || !sellPrice) continue;
+        if (sellPrice <= buyPrice) continue;
 
         const grossPercent =
           ((sellPrice - buyPrice) / buyPrice) * 100;
 
         const totalFees =
-          (FEES[buy.exchange] + FEES[sell.exchange]) * 100;
+          ((FEES[buy.exchange] || 0) +
+           (FEES[sell.exchange] || 0)) * 100;
 
         const netPercent =
           grossPercent - totalFees;
@@ -181,126 +257,74 @@ function calculateOpportunities(markets) {
           sellPrice,
           grossPercent,
           totalFees,
-          netPercent,
+          netPercent
         });
       }
     }
   }
 
-  return opportunities
-    .filter((item) => item.grossPercent > 0)
-    .sort((a, b) => b.netPercent - a.netPercent);
+  return opportunities.sort(
+    (a, b) => b.netPercent - a.netPercent
+  );
 }
 
 // ======================================================
-// API DEL SCANNER
+// API
 // ======================================================
 
 app.get("/api/opportunities", async (req, res) => {
-  try {
-    /*
-      Promise.allSettled permite que el scanner continúe
-      funcionando aunque uno de los exchanges falle.
-    */
+  const names = [
+    "OKX",
+    "KuCoin",
+    "BingX",
+    "Kraken"
+  ];
 
-    const results = await Promise.allSettled([
-      getBinance(),
-      getBybit(),
-      getOKX(),
-    ]);
+  const functions = [
+    getOKX(),
+    getKuCoin(),
+    getBingX(),
+    getKraken()
+  ];
 
-    const binance =
-      results[0].status === "fulfilled"
-        ? results[0].value
-        : {};
+  const results = await Promise.allSettled(functions);
 
-    const bybit =
-      results[1].status === "fulfilled"
-        ? results[1].value
-        : {};
+  const markets = {};
+  const status = {};
+  const counts = {};
 
-    const okx =
-      results[2].status === "fulfilled"
-        ? results[2].value
-        : {};
+  results.forEach((result, index) => {
+    const name = names[index];
 
-    // Mostrar errores individuales en los logs de Render.
+    if (result.status === "fulfilled") {
+      markets[name] = result.value;
+      status[name] = "OK";
+      counts[name] = Object.keys(result.value).length;
+    } else {
+      markets[name] = {};
+      status[name] = "NO DISPONIBLE";
+      counts[name] = 0;
 
-    if (results[0].status === "rejected") {
       console.error(
-        "Binance no disponible:",
-        results[0].reason.message
+        `${name} no disponible:`,
+        result.reason?.message
       );
     }
+  });
 
-    if (results[1].status === "rejected") {
-      console.error(
-        "Bybit no disponible:",
-        results[1].reason.message
-      );
-    }
+  const opportunities =
+    calculateOpportunities(markets);
 
-    if (results[2].status === "rejected") {
-      console.error(
-        "OKX no disponible:",
-        results[2].reason.message
-      );
-    }
-
-    const markets = {
-      Binance: binance,
-      Bybit: bybit,
-      OKX: okx,
-    };
-
-    const opportunities =
-      calculateOpportunities(markets);
-
-    res.json({
-      updatedAt: new Date().toISOString(),
-
-      exchanges: {
-        Binance: Object.keys(binance).length,
-        Bybit: Object.keys(bybit).length,
-        OKX: Object.keys(okx).length,
-      },
-
-      status: {
-        Binance:
-          results[0].status === "fulfilled"
-            ? "OK"
-            : "NO DISPONIBLE",
-
-        Bybit:
-          results[1].status === "fulfilled"
-            ? "OK"
-            : "NO DISPONIBLE",
-
-        OKX:
-          results[2].status === "fulfilled"
-            ? "OK"
-            : "NO DISPONIBLE",
-      },
-
-      opportunities:
-        opportunities.slice(0, 100),
-    });
-  } catch (error) {
-    console.error(
-      "Error general:",
-      error
-    );
-
-    res.status(500).json({
-      error:
-        "No se pudieron procesar los precios.",
-      detail: error.message,
-    });
-  }
+  res.json({
+    updatedAt: new Date().toISOString(),
+    exchanges: counts,
+    status,
+    opportunities: opportunities.slice(0, 100)
+  });
 });
 
 // ======================================================
-// PÁGINA WEB
+// WEB
 // ======================================================
 
 app.get("/", (req, res) => {
@@ -330,8 +354,8 @@ body {
 }
 
 header {
-  padding: 24px;
   background: #111a2c;
+  padding: 24px;
 }
 
 h1 {
@@ -357,7 +381,7 @@ h1 {
   background: #162136;
   padding: 15px 20px;
   border-radius: 10px;
-  min-width: 160px;
+  min-width: 150px;
 }
 
 .exchange-status {
@@ -367,14 +391,29 @@ h1 {
 }
 
 .status {
-  margin-bottom: 15px;
   color: #9ca9bd;
+  margin-bottom: 15px;
+}
+
+button {
+  background: white;
+  border: 0;
+  padding: 10px 18px;
+  border-radius: 7px;
+  font-weight: bold;
+  cursor: pointer;
+  margin-bottom: 15px;
+}
+
+.table-wrapper {
+  overflow-x: auto;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
   background: #111a2c;
+  min-width: 850px;
 }
 
 th,
@@ -412,21 +451,10 @@ th {
   color: #ff7373;
 }
 
-button {
-  background: white;
-  color: #111;
-  border: 0;
-  padding: 10px 18px;
-  border-radius: 7px;
-  cursor: pointer;
-  font-weight: bold;
-  margin-bottom: 15px;
-}
-
 .note {
-  margin-top: 20px;
   color: #9ca9bd;
   font-size: 13px;
+  margin-top: 20px;
   line-height: 1.5;
 }
 
@@ -443,78 +471,24 @@ Crypto Arbitrage Scanner
 </h1>
 
 <div class="subtitle">
-Binance · Bybit · OKX — Spot USDT
+OKX · KuCoin · BingX · Kraken — Spot USDT
 </div>
 
 </header>
 
 <div class="container">
 
-<div class="cards">
-
-<div class="card">
-
-Binance:
-<strong id="binance">
--
-</strong>
-pares
-
-<div
-  class="exchange-status"
-  id="binanceStatus"
->
--
-</div>
-
-</div>
-
-<div class="card">
-
-Bybit:
-<strong id="bybit">
--
-</strong>
-pares
-
-<div
-  class="exchange-status"
-  id="bybitStatus"
->
--
-</div>
-
-</div>
-
-<div class="card">
-
-OKX:
-<strong id="okx">
--
-</strong>
-pares
-
-<div
-  class="exchange-status"
-  id="okxStatus"
->
--
-</div>
-
-</div>
-
-</div>
+<div class="cards" id="cards"></div>
 
 <button onclick="loadData()">
 Actualizar ahora
 </button>
 
-<div
-  class="status"
-  id="status"
->
+<div class="status" id="status">
 Cargando precios...
 </div>
+
+<div class="table-wrapper">
 
 <table>
 
@@ -522,55 +496,33 @@ Cargando precios...
 
 <tr>
 
-<th>
-Moneda
-</th>
-
-<th>
-COMPRAR
-</th>
-
-<th>
-Precio compra
-</th>
-
-<th>
-VENDER
-</th>
-
-<th>
-Precio venta
-</th>
-
-<th>
-Spread
-</th>
-
-<th>
-Comisiones
-</th>
-
-<th>
-NETO
-</th>
+<th>Moneda</th>
+<th>COMPRAR</th>
+<th>Precio compra</th>
+<th>VENDER</th>
+<th>Precio venta</th>
+<th>Spread</th>
+<th>Comisiones</th>
+<th>NETO</th>
 
 </tr>
 
 </thead>
 
-<tbody id="rows">
-</tbody>
+<tbody id="rows"></tbody>
 
 </table>
 
+</div>
+
 <div class="note">
 
-Scanner informativo.
+El scanner usa el mejor precio de venta (ask) para comprar
+y el mejor precio de compra (bid) para vender.
 
-Los precios pueden cambiar antes de ejecutar una operación.
-
-Esta primera versión todavía no calcula la profundidad
-completa del libro, slippage ni costes de transferencia.
+La ganancia indicada todavía es una estimación.
+Antes de operar dinero real agregaremos profundidad del libro,
+volumen disponible, slippage y costes de transferencia.
 
 </div>
 
@@ -578,111 +530,94 @@ completa del libro, slippage ni costes de transferencia.
 
 <script>
 
-function price(value) {
+function formatPrice(value) {
 
   if (value >= 1000) {
-
     return value.toLocaleString(
       "en-US",
-      {
-        maximumFractionDigits: 2
-      }
+      { maximumFractionDigits: 2 }
     );
-
   }
 
   if (value >= 1) {
-
     return value.toFixed(4);
-
   }
 
-  return value.toPrecision(6);
+  return Number(value).toPrecision(6);
 }
 
 async function loadData() {
 
-  const status =
-    document.getElementById(
-      "status"
-    );
+  const statusElement =
+    document.getElementById("status");
 
-  status.textContent =
+  statusElement.textContent =
     "Actualizando precios...";
 
   try {
 
     const response =
-      await fetch(
-        "/api/opportunities"
-      );
+      await fetch("/api/opportunities");
 
     const data =
       await response.json();
 
     if (!response.ok) {
-
       throw new Error(
-        data.detail ||
-        data.error
+        data.error || "Error de servidor"
       );
-
     }
 
-    document.getElementById(
-      "binance"
-    ).textContent =
-      data.exchanges.Binance;
+    const cards =
+      document.getElementById("cards");
 
-    document.getElementById(
-      "bybit"
-    ).textContent =
-      data.exchanges.Bybit;
+    cards.innerHTML = "";
 
-    document.getElementById(
-      "okx"
-    ).textContent =
-      data.exchanges.OKX;
+    const exchangeNames = [
+      "OKX",
+      "KuCoin",
+      "BingX",
+      "Kraken"
+    ];
 
-    document.getElementById(
-      "binanceStatus"
-    ).textContent =
-      data.status.Binance;
+    for (const name of exchangeNames) {
 
-    document.getElementById(
-      "bybitStatus"
-    ).textContent =
-      data.status.Bybit;
+      const card =
+        document.createElement("div");
 
-    document.getElementById(
-      "okxStatus"
-    ).textContent =
-      data.status.OKX;
+      card.className = "card";
+
+      card.innerHTML = \`
+        \${name}:
+        <strong>
+          \${data.exchanges[name] || 0}
+        </strong>
+        pares
+
+        <div class="exchange-status">
+          \${data.status[name]}
+        </div>
+      \`;
+
+      cards.appendChild(card);
+    }
 
     const rows =
-      document.getElementById(
-        "rows"
-      );
+      document.getElementById("rows");
 
     rows.innerHTML = "";
 
     const visible =
       data.opportunities.filter(
-        (x) =>
-          x.netPercent > 0
+        item => item.netPercent > 0
       );
 
-    for (
-      const item
-      of visible.slice(0, 50)
-    ) {
+    for (const item of visible.slice(0, 50)) {
 
-      const tr =
-        document.createElement(
-          "tr"
-        );
+      const row =
+        document.createElement("tr");
 
-      tr.innerHTML = \`
+      row.innerHTML = \`
 
 <td>
 <strong>
@@ -695,7 +630,7 @@ async function loadData() {
 </td>
 
 <td>
-\${price(item.buyPrice)}
+\${formatPrice(item.buyPrice)}
 </td>
 
 <td class="sell">
@@ -703,7 +638,7 @@ async function loadData() {
 </td>
 
 <td>
-\${price(item.sellPrice)}
+\${formatPrice(item.sellPrice)}
 </td>
 
 <td>
@@ -715,7 +650,7 @@ async function loadData() {
 </td>
 
 <td class="\${
-  item.netPercent > 0.20
+  item.netPercent >= 0.20
     ? "good"
     : "bad"
 }">
@@ -724,7 +659,7 @@ async function loadData() {
 
       \`;
 
-      rows.appendChild(tr);
+      rows.appendChild(row);
     }
 
     if (!visible.length) {
@@ -734,7 +669,7 @@ async function loadData() {
 
     }
 
-    status.textContent =
+    statusElement.textContent =
       "Última actualización: " +
       new Date(
         data.updatedAt
@@ -742,9 +677,8 @@ async function loadData() {
 
   } catch (error) {
 
-    status.textContent =
-      "Error: " +
-      error.message;
+    statusElement.textContent =
+      "Error: " + error.message;
 
   }
 }
@@ -753,10 +687,7 @@ loadData();
 
 // Actualización automática cada 10 segundos.
 
-setInterval(
-  loadData,
-  10000
-);
+setInterval(loadData, 10000);
 
 </script>
 
@@ -767,14 +698,12 @@ setInterval(
 });
 
 // ======================================================
-// INICIAR SERVIDOR
+// SERVIDOR
 // ======================================================
 
 app.listen(PORT, () => {
-
   console.log(
     "Crypto Arbitrage Scanner funcionando en puerto " +
     PORT
   );
-
 });
