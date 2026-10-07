@@ -3,6 +3,8 @@ const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Comisiones estimadas.
+// Más adelante conviene reemplazarlas por las comisiones reales de tu cuenta.
 const FEES = {
   OKX: 0.001,
   KuCoin: 0.001,
@@ -10,16 +12,22 @@ const FEES = {
   Kraken: 0.0026
 };
 
+// Por ahora, spreads superiores a este valor no se muestran
+// como oportunidades normales. Quedan clasificados como sospechosos.
+const MAX_NORMAL_GROSS_PERCENT = 10;
+
 async function getJson(url) {
   const response = await fetch(url, {
     headers: {
       "User-Agent": "Mozilla/5.0 CryptoArbitrageScanner/1.0",
-      "Accept": "application/json"
+      Accept: "application/json"
     }
   });
 
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    throw new Error(
+      `${response.status} ${response.statusText}`
+    );
   }
 
   return response.json();
@@ -37,13 +45,20 @@ async function getOKX() {
   const result = {};
 
   for (const item of data.data || []) {
-    if (!item.instId.endsWith("-USDT")) continue;
+    if (!item.instId?.endsWith("-USDT")) continue;
 
     const symbol = item.instId.replace("-", "");
     const bid = Number(item.bidPx);
     const ask = Number(item.askPx);
 
-    if (!bid || !ask) continue;
+    if (
+      !Number.isFinite(bid) ||
+      !Number.isFinite(ask) ||
+      bid <= 0 ||
+      ask <= 0
+    ) {
+      continue;
+    }
 
     result[symbol] = {
       exchange: "OKX",
@@ -68,13 +83,20 @@ async function getKuCoin() {
   const result = {};
 
   for (const item of data.data?.ticker || []) {
-    if (!item.symbol.endsWith("-USDT")) continue;
+    if (!item.symbol?.endsWith("-USDT")) continue;
 
     const symbol = item.symbol.replace("-", "");
     const bid = Number(item.buy);
     const ask = Number(item.sell);
 
-    if (!bid || !ask) continue;
+    if (
+      !Number.isFinite(bid) ||
+      !Number.isFinite(ask) ||
+      bid <= 0 ||
+      ask <= 0
+    ) {
+      continue;
+    }
 
     result[symbol] = {
       exchange: "KuCoin",
@@ -109,7 +131,14 @@ async function getBingX() {
     const bid = Number(item.bidPrice);
     const ask = Number(item.askPrice);
 
-    if (!bid || !ask) continue;
+    if (
+      !Number.isFinite(bid) ||
+      !Number.isFinite(ask) ||
+      bid <= 0 ||
+      ask <= 0
+    ) {
+      continue;
+    }
 
     result[symbol] = {
       exchange: "BingX",
@@ -134,7 +163,9 @@ async function getKraken() {
   const result = {};
   const pairs = [];
 
-  for (const [key, info] of Object.entries(pairsData.result || {})) {
+  for (const [key, info] of Object.entries(
+    pairsData.result || {}
+  )) {
     const wsname = info.wsname || "";
 
     if (!wsname.endsWith("/USDT")) continue;
@@ -145,44 +176,51 @@ async function getKraken() {
     });
   }
 
-  // Kraken permite consultar múltiples pares.
-  // Los dividimos en bloques para evitar URLs excesivamente largas.
-  const chunks = [];
-
+  // Consultamos Kraken en grupos para no generar
+  // una URL excesivamente larga.
   for (let i = 0; i < pairs.length; i += 50) {
-    chunks.push(pairs.slice(i, i + 50));
-  }
+    const chunk = pairs.slice(i, i + 50);
 
-  for (const chunk of chunks) {
     const pairNames = chunk
-      .map(x => x.key)
+      .map(item => item.key)
       .join(",");
 
     const data = await getJson(
       "https://api.kraken.com/0/public/Ticker?pair=" +
-      encodeURIComponent(pairNames)
+        encodeURIComponent(pairNames)
     );
 
     const tickerData = data.result || {};
 
     for (const pair of chunk) {
-      const base = pair.wsname
-        .replace("/USDT", "")
-        .replace("XBT", "BTC");
+      let base = pair.wsname.replace("/USDT", "");
+
+      if (base === "XBT") {
+        base = "BTC";
+      }
 
       const symbol = base + "USDT";
 
       let ticker = tickerData[pair.key];
 
+      // Kraken puede devolver algunos identificadores
+      // diferentes al solicitado.
       if (!ticker) {
-        const possibleKey = Object.keys(tickerData).find(
-          key =>
-            key === pair.key ||
-            key.includes(base)
-        );
+        const tickerKey = Object.keys(
+          tickerData
+        ).find(key => {
+          const normalizedKey = key
+            .replace(/^X/, "")
+            .replace(/^Z/, "");
 
-        if (possibleKey) {
-          ticker = tickerData[possibleKey];
+          return (
+            key === pair.key ||
+            normalizedKey.includes(base)
+          );
+        });
+
+        if (tickerKey) {
+          ticker = tickerData[tickerKey];
         }
       }
 
@@ -191,7 +229,14 @@ async function getKraken() {
       const ask = Number(ticker.a?.[0]);
       const bid = Number(ticker.b?.[0]);
 
-      if (!bid || !ask) continue;
+      if (
+        !Number.isFinite(bid) ||
+        !Number.isFinite(ask) ||
+        bid <= 0 ||
+        ask <= 0
+      ) {
+        continue;
+      }
 
       result[symbol] = {
         exchange: "Kraken",
@@ -213,10 +258,13 @@ function calculateOpportunities(markets) {
   const symbols = new Set();
 
   for (const market of Object.values(markets)) {
-    Object.keys(market).forEach(symbol => symbols.add(symbol));
+    for (const symbol of Object.keys(market)) {
+      symbols.add(symbol);
+    }
   }
 
-  const opportunities = [];
+  const normal = [];
+  const suspicious = [];
 
   for (const symbol of symbols) {
     const quotes = [];
@@ -227,6 +275,7 @@ function calculateOpportunities(markets) {
       }
     }
 
+    // Necesitamos como mínimo dos exchanges.
     if (quotes.length < 2) continue;
 
     for (const buy of quotes) {
@@ -236,7 +285,17 @@ function calculateOpportunities(markets) {
         const buyPrice = buy.ask;
         const sellPrice = sell.bid;
 
-        if (!buyPrice || !sellPrice) continue;
+        if (
+          !Number.isFinite(buyPrice) ||
+          !Number.isFinite(sellPrice) ||
+          buyPrice <= 0 ||
+          sellPrice <= 0
+        ) {
+          continue;
+        }
+
+        // No existe arbitraje si el precio de venta
+        // no supera al precio real de compra.
         if (sellPrice <= buyPrice) continue;
 
         const grossPercent =
@@ -244,12 +303,13 @@ function calculateOpportunities(markets) {
 
         const totalFees =
           ((FEES[buy.exchange] || 0) +
-           (FEES[sell.exchange] || 0)) * 100;
+            (FEES[sell.exchange] || 0)) *
+          100;
 
         const netPercent =
           grossPercent - totalFees;
 
-        opportunities.push({
+        const opportunity = {
           symbol,
           buyExchange: buy.exchange,
           buyPrice,
@@ -258,14 +318,34 @@ function calculateOpportunities(markets) {
           grossPercent,
           totalFees,
           netPercent
-        });
+        };
+
+        // No ocultamos completamente las anomalías:
+        // las clasificamos aparte.
+        if (
+          grossPercent >
+          MAX_NORMAL_GROSS_PERCENT
+        ) {
+          suspicious.push(opportunity);
+        } else if (netPercent > 0) {
+          normal.push(opportunity);
+        }
       }
     }
   }
 
-  return opportunities.sort(
+  normal.sort(
     (a, b) => b.netPercent - a.netPercent
   );
+
+  suspicious.sort(
+    (a, b) => b.grossPercent - a.grossPercent
+  );
+
+  return {
+    normal,
+    suspicious
+  };
 }
 
 // ======================================================
@@ -273,33 +353,35 @@ function calculateOpportunities(markets) {
 // ======================================================
 
 app.get("/api/opportunities", async (req, res) => {
-  const names = [
+  const exchangeNames = [
     "OKX",
     "KuCoin",
     "BingX",
     "Kraken"
   ];
 
-  const functions = [
+  const requests = [
     getOKX(),
     getKuCoin(),
     getBingX(),
     getKraken()
   ];
 
-  const results = await Promise.allSettled(functions);
+  const results =
+    await Promise.allSettled(requests);
 
   const markets = {};
   const status = {};
   const counts = {};
 
   results.forEach((result, index) => {
-    const name = names[index];
+    const name = exchangeNames[index];
 
     if (result.status === "fulfilled") {
       markets[name] = result.value;
       status[name] = "OK";
-      counts[name] = Object.keys(result.value).length;
+      counts[name] =
+        Object.keys(result.value).length;
     } else {
       markets[name] = {};
       status[name] = "NO DISPONIBLE";
@@ -312,14 +394,17 @@ app.get("/api/opportunities", async (req, res) => {
     }
   });
 
-  const opportunities =
+  const calculated =
     calculateOpportunities(markets);
 
   res.json({
     updatedAt: new Date().toISOString(),
     exchanges: counts,
     status,
-    opportunities: opportunities.slice(0, 100)
+    opportunities:
+      calculated.normal.slice(0, 200),
+    suspiciousCount:
+      calculated.suspicious.length
   });
 });
 
@@ -390,11 +475,6 @@ h1 {
   color: #9ca9bd;
 }
 
-.status {
-  color: #9ca9bd;
-  margin-bottom: 15px;
-}
-
 button {
   background: white;
   border: 0;
@@ -402,7 +482,24 @@ button {
   border-radius: 7px;
   font-weight: bold;
   cursor: pointer;
+}
+
+.refresh-button {
+  margin-bottom: 12px;
+}
+
+.status {
+  color: #9ca9bd;
   margin-bottom: 15px;
+}
+
+.warning {
+  background: #332713;
+  border: 1px solid #69501d;
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 15px;
+  color: #ffd875;
 }
 
 .table-wrapper {
@@ -413,7 +510,7 @@ table {
   width: 100%;
   border-collapse: collapse;
   background: #111a2c;
-  min-width: 850px;
+  min-width: 950px;
 }
 
 th,
@@ -425,6 +522,11 @@ td {
 
 th:first-child,
 td:first-child {
+  text-align: center;
+}
+
+th:nth-child(2),
+td:nth-child(2) {
   text-align: left;
 }
 
@@ -447,8 +549,22 @@ th {
   font-weight: bold;
 }
 
-.bad {
-  color: #ff7373;
+.star {
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  margin: 0;
+  font-size: 22px;
+  cursor: pointer;
+  color: #6f7c91;
+}
+
+.star.active {
+  color: #ffd54a;
+}
+
+.favorite-row {
+  background: #18243a;
 }
 
 .note {
@@ -466,9 +582,7 @@ th {
 
 <header>
 
-<h1>
-Crypto Arbitrage Scanner
-</h1>
+<h1>Crypto Arbitrage Scanner</h1>
 
 <div class="subtitle">
 OKX · KuCoin · BingX · Kraken — Spot USDT
@@ -480,13 +594,22 @@ OKX · KuCoin · BingX · Kraken — Spot USDT
 
 <div class="cards" id="cards"></div>
 
-<button onclick="loadData()">
+<button
+  class="refresh-button"
+  onclick="loadData()"
+>
 Actualizar ahora
 </button>
 
 <div class="status" id="status">
 Cargando precios...
 </div>
+
+<div
+  class="warning"
+  id="warning"
+  style="display:none"
+></div>
 
 <div class="table-wrapper">
 
@@ -495,7 +618,7 @@ Cargando precios...
 <thead>
 
 <tr>
-
+<th>⭐</th>
 <th>Moneda</th>
 <th>COMPRAR</th>
 <th>Precio compra</th>
@@ -504,7 +627,6 @@ Cargando precios...
 <th>Spread</th>
 <th>Comisiones</th>
 <th>NETO</th>
-
 </tr>
 
 </thead>
@@ -517,12 +639,24 @@ Cargando precios...
 
 <div class="note">
 
-El scanner usa el mejor precio de venta (ask) para comprar
-y el mejor precio de compra (bid) para vender.
+⭐ Las oportunidades marcadas quedan guardadas
+en este navegador y aparecen primero aunque
+la tabla se actualice.
 
-La ganancia indicada todavía es una estimación.
-Antes de operar dinero real agregaremos profundidad del libro,
-volumen disponible, slippage y costes de transferencia.
+<br><br>
+
+Los spreads superiores al 10% se consideran
+sospechosos y no aparecen en la tabla principal.
+Esto evita tomar como válida una diferencia
+extrema sin verificar antes que sea exactamente
+el mismo activo y que exista liquidez real.
+
+<br><br>
+
+Todavía falta incorporar profundidad del libro,
+slippage, volumen disponible y costes/redes de
+transferencia antes de considerar una oportunidad
+como ejecutable.
 
 </div>
 
@@ -530,94 +664,140 @@ volumen disponible, slippage y costes de transferencia.
 
 <script>
 
-function formatPrice(value) {
+const FAVORITES_KEY =
+  "crypto-arbitrage-favorites-v1";
 
+function getFavorites() {
+  try {
+    const saved =
+      localStorage.getItem(FAVORITES_KEY);
+
+    return new Set(
+      saved ? JSON.parse(saved) : []
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function saveFavorites(favorites) {
+  localStorage.setItem(
+    FAVORITES_KEY,
+    JSON.stringify([...favorites])
+  );
+}
+
+// La favorita identifica moneda + exchange de compra
+// + exchange de venta.
+function getOpportunityId(item) {
+  return [
+    item.symbol,
+    item.buyExchange,
+    item.sellExchange
+  ].join("|");
+}
+
+function toggleFavorite(id) {
+  const favorites = getFavorites();
+
+  if (favorites.has(id)) {
+    favorites.delete(id);
+  } else {
+    favorites.add(id);
+  }
+
+  saveFavorites(favorites);
+
+  // Redibujamos usando los últimos datos.
+  renderRows(window.lastOpportunities || []);
+}
+
+function formatPrice(value) {
   if (value >= 1000) {
     return value.toLocaleString(
       "en-US",
-      { maximumFractionDigits: 2 }
+      {
+        maximumFractionDigits: 4
+      }
     );
   }
 
   if (value >= 1) {
-    return value.toFixed(4);
+    return value.toFixed(6);
   }
 
-  return Number(value).toPrecision(6);
+  return Number(value).toPrecision(7);
 }
 
-async function loadData() {
+function renderRows(opportunities) {
+  const rows =
+    document.getElementById("rows");
 
-  const statusElement =
-    document.getElementById("status");
+  rows.innerHTML = "";
 
-  statusElement.textContent =
-    "Actualizando precios...";
+  const favorites = getFavorites();
 
-  try {
+  const sorted = [...opportunities].sort(
+    (a, b) => {
+      const aFavorite =
+        favorites.has(
+          getOpportunityId(a)
+        );
 
-    const response =
-      await fetch("/api/opportunities");
+      const bFavorite =
+        favorites.has(
+          getOpportunityId(b)
+        );
 
-    const data =
-      await response.json();
+      if (aFavorite && !bFavorite) {
+        return -1;
+      }
 
-    if (!response.ok) {
-      throw new Error(
-        data.error || "Error de servidor"
-      );
+      if (!aFavorite && bFavorite) {
+        return 1;
+      }
+
+      return b.netPercent - a.netPercent;
+    }
+  );
+
+  if (!sorted.length) {
+    rows.innerHTML =
+      '<tr><td colspan="9">No hay oportunidades netas positivas dentro del filtro actual.</td></tr>';
+
+    return;
+  }
+
+  for (const item of sorted.slice(0, 100)) {
+    const id =
+      getOpportunityId(item);
+
+    const isFavorite =
+      favorites.has(id);
+
+    const row =
+      document.createElement("tr");
+
+    if (isFavorite) {
+      row.className = "favorite-row";
     }
 
-    const cards =
-      document.getElementById("cards");
+    const star =
+      isFavorite ? "★" : "☆";
 
-    cards.innerHTML = "";
+    row.innerHTML = \`
 
-    const exchangeNames = [
-      "OKX",
-      "KuCoin",
-      "BingX",
-      "Kraken"
-    ];
-
-    for (const name of exchangeNames) {
-
-      const card =
-        document.createElement("div");
-
-      card.className = "card";
-
-      card.innerHTML = \`
-        \${name}:
-        <strong>
-          \${data.exchanges[name] || 0}
-        </strong>
-        pares
-
-        <div class="exchange-status">
-          \${data.status[name]}
-        </div>
-      \`;
-
-      cards.appendChild(card);
-    }
-
-    const rows =
-      document.getElementById("rows");
-
-    rows.innerHTML = "";
-
-    const visible =
-      data.opportunities.filter(
-        item => item.netPercent > 0
-      );
-
-    for (const item of visible.slice(0, 50)) {
-
-      const row =
-        document.createElement("tr");
-
-      row.innerHTML = \`
+<td>
+<button
+  class="star \${
+    isFavorite ? "active" : ""
+  }"
+  onclick='toggleFavorite(\${JSON.stringify(id)})'
+  title="Marcar oportunidad"
+>
+\${star}
+</button>
+</td>
 
 <td>
 <strong>
@@ -649,24 +829,91 @@ async function loadData() {
 \${item.totalFees.toFixed(3)}%
 </td>
 
-<td class="\${
-  item.netPercent >= 0.20
-    ? "good"
-    : "bad"
-}">
+<td class="good">
 \${item.netPercent.toFixed(3)}%
 </td>
 
-      \`;
+    \`;
 
-      rows.appendChild(row);
+    rows.appendChild(row);
+  }
+}
+
+async function loadData() {
+  const statusElement =
+    document.getElementById("status");
+
+  statusElement.textContent =
+    "Actualizando precios...";
+
+  try {
+    const response =
+      await fetch(
+        "/api/opportunities",
+        { cache: "no-store" }
+      );
+
+    const data =
+      await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.error || "Error de servidor"
+      );
     }
 
-    if (!visible.length) {
+    const cards =
+      document.getElementById("cards");
 
-      rows.innerHTML =
-        '<tr><td colspan="8">No hay oportunidades netas positivas en este momento.</td></tr>';
+    cards.innerHTML = "";
 
+    const exchangeNames = [
+      "OKX",
+      "KuCoin",
+      "BingX",
+      "Kraken"
+    ];
+
+    for (const name of exchangeNames) {
+      const card =
+        document.createElement("div");
+
+      card.className = "card";
+
+      card.innerHTML = \`
+        \${name}:
+        <strong>
+          \${data.exchanges[name] || 0}
+        </strong>
+        pares
+
+        <div class="exchange-status">
+          \${data.status[name]}
+        </div>
+      \`;
+
+      cards.appendChild(card);
+    }
+
+    window.lastOpportunities =
+      data.opportunities || [];
+
+    renderRows(
+      window.lastOpportunities
+    );
+
+    const warning =
+      document.getElementById("warning");
+
+    if (data.suspiciousCount > 0) {
+      warning.style.display = "block";
+
+      warning.textContent =
+        "🛡️ " +
+        data.suspiciousCount +
+        " comparaciones con spread superior al 10% fueron separadas por seguridad.";
+    } else {
+      warning.style.display = "none";
     }
 
     statusElement.textContent =
@@ -676,17 +923,14 @@ async function loadData() {
       ).toLocaleTimeString();
 
   } catch (error) {
-
     statusElement.textContent =
       "Error: " + error.message;
-
   }
 }
 
 loadData();
 
-// Actualización automática cada 10 segundos.
-
+// Refresco automático cada 10 segundos.
 setInterval(loadData, 10000);
 
 </script>
